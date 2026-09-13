@@ -1,0 +1,12 @@
+{
+  "name": "plan-do-see-diary",
+  "version": "1.0.0",
+  "description": "플랜두씨 다이어리 - 계획/할일/자격증 캘린더",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
