@@ -2,10 +2,16 @@ const state = {
   plans: [],
   todosByPlan: {}, // planId -> array
   expanded: new Set(),
+  historyOpen: new Set(),
+  historyByPlan: {},
+  editingTodoId: null,
+  execEvidenceOpen: null,
   editingPlanId: null,
   calYear: null,
   calMonth: null, // 0-11
   certByDate: {},
+  executions: [], // 전체 실행 기록 (todo_id, exec_date 등)
+  todoFilters: {}, // planId -> { q, status, sort }
 };
 
 const priorityLabel = { high: '높음', mid: '보통', low: '낮음' };
@@ -79,8 +85,18 @@ document.querySelectorAll('.nav-btn').forEach((btn) => {
     document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('view-' + btn.dataset.view).classList.add('active');
+    if (btn.dataset.view === 'review') renderReview();
   });
 });
+
+// ---------- 실행 기록 ----------
+async function loadExecutions() {
+  state.executions = await api('/api/executions');
+}
+
+function executionsForTodo(todoId) {
+  return state.executions.filter((e) => e.todo_id === todoId);
+}
 
 // ---------- 계획 ----------
 async function loadPlans() {
@@ -170,12 +186,17 @@ function renderPlanCard(plan) {
       progressWrap,
     ]),
     el('div', { class: 'plan-actions' }, [
+      el('button', { class: 'icon-btn', title: '수정 이력', onclick: (e) => { e.stopPropagation(); toggleHistory(plan.id); } }, '🕓'),
       el('button', { class: 'icon-btn', title: '수정', onclick: (e) => { e.stopPropagation(); openPlanForm(plan); } }, '✎'),
       el('button', { class: 'icon-btn', title: '삭제', onclick: (e) => { e.stopPropagation(); deletePlan(plan.id); } }, '🗑'),
     ]),
   ]);
 
   card.appendChild(top);
+
+  if (state.historyOpen.has(plan.id)) {
+    card.appendChild(renderHistorySection(plan.id));
+  }
 
   if (isOpen) {
     card.appendChild(renderTodoSection(plan));
@@ -187,22 +208,128 @@ function renderPlanCard(plan) {
   return card;
 }
 
+const PLAN_FIELD_LABEL = {
+  title: '제목', period_start: '시작일', period_end: '종료일',
+  priority: '우선순위', success_criteria: '성공 기준', estimated_hours: '예상 시간',
+};
+
+async function toggleHistory(planId) {
+  if (state.historyOpen.has(planId)) {
+    state.historyOpen.delete(planId);
+  } else {
+    state.historyOpen.add(planId);
+    if (!state.historyByPlan[planId]) {
+      state.historyByPlan[planId] = await api(`/api/plans/${planId}/history`);
+    }
+  }
+  renderPlans();
+}
+
+function renderHistorySection(planId) {
+  const section = el('div', { class: 'history-section' });
+  section.appendChild(el('div', { class: 'plan-meta' }, '수정 이력'));
+  const entries = state.historyByPlan[planId];
+  if (!entries) {
+    section.appendChild(el('p', { class: 'empty' }, '불러오는 중...'));
+    return section;
+  }
+  if (entries.length === 0) {
+    section.appendChild(el('p', { class: 'empty' }, '아직 수정한 적이 없습니다.'));
+    return section;
+  }
+  for (const entry of entries) {
+    const changedFields = Object.keys(PLAN_FIELD_LABEL).filter(
+      (k) => String(entry.before[k] ?? '') !== String(entry.after[k] ?? '')
+    );
+    const diff = el('div', { class: 'history-diff' },
+      changedFields.map((k) => el('span', { class: 'field-change' }, [
+        document.createTextNode(PLAN_FIELD_LABEL[k] + ': '),
+        el('span', { class: 'old' }, String(entry.before[k] ?? '(없음)')),
+        document.createTextNode(' → '),
+        el('span', { class: 'new' }, String(entry.after[k] ?? '(없음)')),
+      ]))
+    );
+    section.appendChild(el('div', { class: 'history-row' }, [
+      el('div', { class: 'history-time' }, new Date(entry.changed_at).toLocaleString('ko-KR')),
+      diff,
+    ]));
+  }
+  return section;
+}
+
+function getTodoFilter(planId) {
+  if (!state.todoFilters[planId]) {
+    state.todoFilters[planId] = { q: '', status: 'all', sort: 'due' };
+  }
+  return state.todoFilters[planId];
+}
+
+function applyTodoFilter(todos, filter) {
+  let result = todos.filter((t) => {
+    if (filter.status === 'done' && t.status !== 'done') return false;
+    if (filter.status === 'pending' && t.status !== 'pending') return false;
+    if (filter.q && !t.title.toLowerCase().includes(filter.q.toLowerCase())) return false;
+    return true;
+  });
+  const prioRank = { high: 0, mid: 1, low: 2 };
+  const sorters = {
+    due: (a, b) => (a.due_date || '9999-99-99').localeCompare(b.due_date || '9999-99-99'),
+    priority: (a, b) => (prioRank[a.priority] ?? 9) - (prioRank[b.priority] ?? 9),
+    created: (a, b) => (a.created_at || '').localeCompare(b.created_at || ''),
+  };
+  return [...result].sort(sorters[filter.sort] || sorters.due);
+}
+
+function renderTodoToolbar(plan, listEl, allTodos) {
+  const filter = getTodoFilter(plan.id);
+
+  function refreshList() {
+    const filtered = applyTodoFilter(allTodos, filter);
+    listEl.innerHTML = '';
+    if (allTodos.length === 0) {
+      listEl.appendChild(el('p', { class: 'empty' }, '세부 할 일이 없습니다.'));
+    } else if (filtered.length === 0) {
+      listEl.appendChild(el('p', { class: 'empty' }, '검색·필터 조건에 맞는 할 일이 없습니다.'));
+    }
+    for (const todo of filtered) {
+      listEl.appendChild(renderTodoItem(plan.id, todo));
+    }
+  }
+
+  const q = el('input', { type: 'text', placeholder: '할 일 검색', value: filter.q });
+  q.addEventListener('input', () => { filter.q = q.value; refreshList(); });
+
+  const statusSelect = el('select', {}, [
+    el('option', { value: 'all' }, '전체 상태'),
+    el('option', { value: 'pending' }, '진행중'),
+    el('option', { value: 'done' }, '완료'),
+  ]);
+  statusSelect.value = filter.status;
+  statusSelect.addEventListener('change', () => { filter.status = statusSelect.value; refreshList(); });
+
+  const sortSelect = el('select', {}, [
+    el('option', { value: 'due' }, '마감일순'),
+    el('option', { value: 'priority' }, '우선순위순'),
+    el('option', { value: 'created' }, '생성순'),
+  ]);
+  sortSelect.value = filter.sort;
+  sortSelect.addEventListener('change', () => { filter.sort = sortSelect.value; refreshList(); });
+
+  refreshList();
+  return el('div', { class: 'todo-toolbar' }, [q, statusSelect, sortSelect]);
+}
+
 function renderTodoSection(plan) {
   const section = el('div', { class: 'todo-section' });
-  const todos = state.todosByPlan[plan.id];
+  const allTodos = state.todosByPlan[plan.id];
 
-  if (!todos) {
+  if (!allTodos) {
     section.appendChild(el('p', { class: 'empty' }, '불러오는 중...'));
     return section;
   }
 
   const listEl = el('div', { class: 'todo-list' });
-  if (todos.length === 0) {
-    listEl.appendChild(el('p', { class: 'empty' }, '세부 할 일이 없습니다.'));
-  }
-  for (const todo of todos) {
-    listEl.appendChild(renderTodoItem(plan.id, todo));
-  }
+  section.appendChild(renderTodoToolbar(plan, listEl, allTodos));
   section.appendChild(listEl);
 
   // 할 일 추가 폼
@@ -325,6 +452,10 @@ function renderTodoSection(plan) {
 }
 
 function renderTodoItem(planId, todo) {
+  if (state.editingTodoId === todo.id) {
+    return renderTodoEditForm(planId, todo);
+  }
+
   const checkbox = el('input', { type: 'checkbox' });
   checkbox.checked = todo.status === 'done';
   checkbox.addEventListener('change', async () => {
@@ -342,10 +473,36 @@ function renderTodoItem(planId, todo) {
   if (todo.tag) tags.push(`#${todo.tag}`);
   if (todo.estimated_hours != null) tags.push(`${todo.estimated_hours}h`);
 
+  const execs = executionsForTodo(todo.id);
+  const execBtn = el('button', {
+    class: 'icon-btn exec-btn', title: '오늘 실행 기록 남기기',
+    onclick: async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; // 연달아 두 번 눌러도 요청이 겹치지 않도록 즉시 비활성화
+      try {
+        await api(`/api/todos/${todo.id}/executions`, { method: 'POST', body: JSON.stringify({}) });
+        await loadExecutions();
+        renderPlans();
+      } finally {
+        btn.disabled = false;
+      }
+    },
+  }, '▶ 실행');
+
+  const execCount = el('span', {
+    class: 'exec-count', title: '실행 기록(근거) 보기',
+    onclick: () => toggleExecEvidence(todo.id),
+  }, `실행 ${execs.length}회`);
+
   const item = el('div', { class: 'todo-item' + (todo.status === 'done' ? ' done' : '') }, [
     checkbox,
     el('span', { class: 'todo-title' }, todo.title),
     el('span', { class: 'todo-tags' }, tags.join(' · ')),
+    execCount,
+    execBtn,
+    el('button', {
+      class: 'icon-btn', title: '수정', onclick: () => { state.editingTodoId = todo.id; renderPlans(); },
+    }, '✎'),
     el('button', {
       class: 'icon-btn', title: '삭제', onclick: async () => {
         if (!(await confirmDialog('이 할 일을 삭제할까요?'))) return;
@@ -355,7 +512,75 @@ function renderTodoItem(planId, todo) {
       },
     }, '✕'),
   ]);
+
+  if (state.execEvidenceOpen === todo.id) {
+    const evidence = el('div', { class: 'evidence-list' },
+      execs.length
+        ? execs.map((e) => el('div', { class: 'evidence-row' }, `✔ ${e.exec_date}`))
+        : [el('div', { class: 'evidence-row' }, '아직 실행 기록이 없습니다.')]
+    );
+    const wrap = el('div', {}, [item, evidence]);
+    return wrap;
+  }
+
   return item;
+}
+
+function toggleExecEvidence(todoId) {
+  state.execEvidenceOpen = state.execEvidenceOpen === todoId ? null : todoId;
+  renderPlans();
+}
+
+function renderTodoEditForm(planId, todo) {
+  const plan = state.plans.find((p) => p.id === planId);
+  const titleInput = el('input', { type: 'text', value: todo.title });
+  const dueAttrs = { type: 'date', value: todo.due_date || '' };
+  if (plan && plan.period_start) dueAttrs.min = plan.period_start;
+  if (plan && plan.period_end) dueAttrs.max = plan.period_end;
+  const dueInput = el('input', dueAttrs);
+  const priSelect = el('select', {}, [
+    el('option', { value: 'high' }, '높음'),
+    el('option', { value: 'mid' }, '보통'),
+    el('option', { value: 'low' }, '낮음'),
+  ]);
+  priSelect.value = todo.priority || 'mid';
+  const tagInput = el('input', { type: 'text', value: todo.tag || '' });
+  const hoursInput = el('input', { type: 'number', min: '0', step: '0.5', value: todo.estimated_hours ?? '' });
+  const errorP = el('p', { class: 'field-error hidden' }, '');
+
+  const form = el('form', { class: 'todo-edit-form' }, [
+    titleInput, dueInput, priSelect, tagInput, hoursInput,
+    errorP,
+    el('div', { class: 'form-actions' }, [
+      el('button', { type: 'button', class: 'btn ghost small', onclick: () => { state.editingTodoId = null; renderPlans(); } }, '취소'),
+      el('button', { type: 'submit', class: 'btn primary small' }, '저장'),
+    ]),
+  ]);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api(`/api/todos/${todo.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          title: titleInput.value.trim(),
+          due_date: dueInput.value || null,
+          priority: priSelect.value,
+          tag: tagInput.value.trim() || null,
+          estimated_hours: hoursInput.value ? Number(hoursInput.value) : null,
+        }),
+      });
+    } catch (err) {
+      errorP.textContent = err.message;
+      errorP.classList.remove('hidden');
+      return;
+    }
+    state.editingTodoId = null;
+    await loadTodos(planId);
+    renderPlans();
+  });
+
+  return form;
 }
 
 async function loadTodos(planId) {
@@ -720,12 +945,122 @@ document.getElementById('cal-next').addEventListener('click', () => {
   renderCalendar();
 });
 
+// ---------- 돌아보기 ----------
+let reviewDetailKey = null;
+
+async function renderReview() {
+  const stats = await api('/api/stats');
+  const statsEl = document.getElementById('review-stats');
+  statsEl.innerHTML = '';
+
+  const completedPlans = state.plans.filter((p) => isPlanComplete(p));
+
+  const cards = [
+    { key: 'plans', num: stats.plan_count, label: '총 계획' },
+    { key: 'completed', num: completedPlans.length, label: '완료된 계획' },
+    { key: 'todos', num: stats.todo_count, label: '총 할 일' },
+    { key: 'rate', num: stats.completion_rate + '%', label: '할 일 완료율' },
+    { key: 'exec', num: stats.execution_count, label: '총 실행 기록' },
+  ];
+
+  for (const c of cards) {
+    statsEl.appendChild(el('div', {
+      class: 'stat-card',
+      onclick: () => { reviewDetailKey = reviewDetailKey === c.key ? null : c.key; renderReviewDetail(); },
+    }, [
+      el('div', { class: 'stat-num' }, String(c.num)),
+      el('div', { class: 'stat-label' }, c.label),
+    ]));
+  }
+
+  renderReviewDetail();
+  await renderReviewPlans(completedPlans);
+}
+
+function renderReviewDetail() {
+  const box = document.getElementById('review-detail');
+  box.innerHTML = '';
+  if (!reviewDetailKey) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+
+  const titleMap = {
+    plans: '전체 계획 목록 (근거)',
+    completed: '완료된 계획 목록 (근거)',
+    todos: '전체 할 일 목록 (근거)',
+    rate: '완료 처리된 할 일 (근거)',
+    exec: '실행 기록 전체 (근거)',
+  };
+  box.appendChild(el('h2', { class: 'review-subtitle', style: 'margin:0 0 8px;' }, titleMap[reviewDetailKey]));
+
+  const rows = [];
+  if (reviewDetailKey === 'plans') {
+    for (const p of state.plans) rows.push(p.title);
+  } else if (reviewDetailKey === 'completed') {
+    for (const p of state.plans.filter(isPlanComplete)) rows.push(p.title);
+  } else if (reviewDetailKey === 'todos') {
+    for (const t of Object.values(state.todosByPlan).flat()) rows.push(`${t.title} · ${t.status === 'done' ? '완료' : '진행중'}`);
+  } else if (reviewDetailKey === 'rate') {
+    for (const t of Object.values(state.todosByPlan).flat().filter((t) => t.status === 'done')) rows.push(t.title);
+  } else if (reviewDetailKey === 'exec') {
+    for (const e of state.executions) rows.push(`${e.plan_title} · ${e.todo_title} · ${e.exec_date}`);
+  }
+
+  if (rows.length === 0) {
+    box.appendChild(el('div', { class: 'evidence-row' }, '아직 근거 데이터가 없습니다.'));
+  }
+  for (const r of rows) box.appendChild(el('div', { class: 'evidence-row' }, r));
+}
+
+async function renderReviewPlans(completedPlans) {
+  const list = document.getElementById('review-plans');
+  const empty = document.getElementById('review-empty');
+  list.innerHTML = '';
+  empty.classList.toggle('hidden', completedPlans.length > 0);
+
+  const incomplete = state.plans
+    .filter((p) => !isPlanComplete(p))
+    .sort((a, b) => (a.period_start || '').localeCompare(b.period_start || ''));
+  const nextPlan = incomplete[0];
+
+  for (const plan of completedPlans) {
+    const card = el('div', { class: 'plan-card completed' });
+    card.appendChild(el('div', { class: 'plan-title-row' }, [
+      el('span', { class: 'plan-title' }, plan.title),
+      el('span', { class: 'badge complete-badge' }, '완료 ✓'),
+    ]));
+    card.appendChild(el('div', { class: 'plan-meta' }, planMetaText(plan) || ''));
+    card.appendChild(el('div', { class: 'next-plan-line' },
+      nextPlan ? `→ 다음 계획: ${nextPlan.title}` : '→ 다음 계획: 없음 (모든 계획을 완료했습니다)'
+    ));
+
+    const textarea = el('textarea', { placeholder: '이 계획을 하면서 느낀 점, 잘된 점, 아쉬운 점을 적어보세요.' });
+    const saveBtn = el('button', { class: 'btn primary small', type: 'button' }, '메모 저장');
+    const savedNote = el('span', { class: 'plan-progress' }, '');
+    const retroBox = el('div', { class: 'retro-box' }, [
+      el('div', { class: 'plan-meta' }, '돌아보기 메모'),
+      textarea,
+      el('div', { class: 'form-actions' }, [savedNote, saveBtn]),
+    ]);
+    card.appendChild(retroBox);
+    list.appendChild(card);
+
+    const existingNote = await api(`/api/plans/${plan.id}/retrospective`);
+    textarea.value = existingNote ? existingNote.note : '';
+
+    saveBtn.addEventListener('click', async () => {
+      await api(`/api/plans/${plan.id}/retrospective`, { method: 'PUT', body: JSON.stringify({ note: textarea.value }) });
+      savedNote.textContent = '저장됨 ✓';
+      setTimeout(() => { savedNote.textContent = ''; }, 2000);
+    });
+  }
+}
+
 // ---------- 초기화 ----------
 (async function init() {
   const now = new Date();
   state.calYear = now.getFullYear();
   state.calMonth = now.getMonth();
-  await Promise.all([loadPlans(), loadCerts()]);
+  await Promise.all([loadPlans(), loadCerts(), loadExecutions()]);
   renderCalendar();
   renderLegend();
 })();
