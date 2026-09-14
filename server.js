@@ -43,6 +43,33 @@ db.exec(`
     end_date TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS plan_history (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    before_json TEXT NOT NULL,
+    after_json TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
+    FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS todo_executions (
+    id TEXT PRIMARY KEY,
+    todo_id TEXT NOT NULL,
+    exec_date TEXT NOT NULL,
+    executed_at TEXT NOT NULL,
+    FOREIGN KEY (todo_id) REFERENCES todos(id) ON DELETE CASCADE,
+    UNIQUE (todo_id, exec_date)
+  );
+
+  CREATE TABLE IF NOT EXISTS retrospectives (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL UNIQUE,
+    note TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
+  );
 `);
 
 // ---- 자격증 일정 (고정 데이터) ----
@@ -299,17 +326,35 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const validationError = validatePlanBody(body);
       if (validationError) return send(res, 400, { error: validationError });
+      const nextValues = {
+        title: String(body.title).trim(),
+        period_start: body.period_start || null,
+        period_end: body.period_end || null,
+        priority: body.priority || null,
+        success_criteria: body.success_criteria || null,
+        estimated_hours: body.estimated_hours != null ? Number(body.estimated_hours) : null,
+      };
+      const changed = Object.keys(nextValues).some((k) => String(existing[k] ?? '') !== String(nextValues[k] ?? ''));
       db.prepare(
         `UPDATE plans SET title=?, period_start=?, period_end=?, priority=?, success_criteria=?, estimated_hours=? WHERE id=?`
       ).run(
-        String(body.title).trim(),
-        body.period_start || null,
-        body.period_end || null,
-        body.priority || null,
-        body.success_criteria || null,
-        body.estimated_hours != null ? Number(body.estimated_hours) : null,
+        nextValues.title,
+        nextValues.period_start,
+        nextValues.period_end,
+        nextValues.priority,
+        nextValues.success_criteria,
+        nextValues.estimated_hours,
         id
       );
+      if (changed) {
+        const before = {
+          title: existing.title, period_start: existing.period_start, period_end: existing.period_end,
+          priority: existing.priority, success_criteria: existing.success_criteria, estimated_hours: existing.estimated_hours,
+        };
+        db.prepare(
+          `INSERT INTO plan_history (id, plan_id, before_json, after_json, changed_at) VALUES (?, ?, ?, ?, ?)`
+        ).run(randomUUID(), id, JSON.stringify(before), JSON.stringify(nextValues), new Date().toISOString());
+      }
       const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(id);
       return send(res, 200, row);
     }
@@ -387,6 +432,114 @@ const server = http.createServer(async (req, res) => {
       const id = m[1];
       db.prepare('DELETE FROM todos WHERE id = ?').run(id);
       return send(res, 204, {});
+    }
+
+    // ---- 계획 수정 이력 ----
+    m = pathname.match(/^\/api\/plans\/([^/]+)\/history$/);
+    if (m && method === 'GET') {
+      const rows = db.prepare('SELECT * FROM plan_history WHERE plan_id = ? ORDER BY changed_at DESC').all(m[1]);
+      return send(res, 200, rows.map((r) => ({
+        id: r.id,
+        changed_at: r.changed_at,
+        before: JSON.parse(r.before_json),
+        after: JSON.parse(r.after_json),
+      })));
+    }
+
+    // ---- 할 일 실행 기록 (체크인) ----
+    // 같은 날짜에 여러 번 요청해도 UNIQUE(todo_id, exec_date) 제약으로 1건만 기록됨 (idempotent)
+    m = pathname.match(/^\/api\/todos\/([^/]+)\/executions$/);
+    if (m && method === 'POST') {
+      const todoId = m[1];
+      const todo = db.prepare('SELECT * FROM todos WHERE id = ?').get(todoId);
+      if (!todo) return send(res, 404, { error: '할 일을 찾을 수 없습니다.' });
+      const execDate = seoulToday();
+      db.prepare(
+        `INSERT INTO todo_executions (id, todo_id, exec_date, executed_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(todo_id, exec_date) DO NOTHING`
+      ).run(randomUUID(), todoId, execDate, new Date().toISOString());
+      const rows = db.prepare('SELECT * FROM todo_executions WHERE todo_id = ? ORDER BY exec_date DESC').all(todoId);
+      return send(res, 200, { exec_date: execDate, count: rows.length, executions: rows });
+    }
+
+    if (m && method === 'GET') {
+      const rows = db.prepare('SELECT * FROM todo_executions WHERE todo_id = ? ORDER BY exec_date DESC').all(m[1]);
+      return send(res, 200, rows);
+    }
+
+    // ---- 전체 실행 기록 (집계 화면 근거 조회용) ----
+    if (pathname === '/api/executions' && method === 'GET') {
+      const rows = db.prepare(`
+        SELECT te.id, te.todo_id, te.exec_date, te.executed_at, t.title AS todo_title, t.plan_id, p.title AS plan_title
+        FROM todo_executions te
+        JOIN todos t ON t.id = te.todo_id
+        JOIN plans p ON p.id = t.plan_id
+        ORDER BY te.executed_at DESC
+      `).all();
+      return send(res, 200, rows);
+    }
+
+    // ---- 돌아보기 메모 ----
+    m = pathname.match(/^\/api\/plans\/([^/]+)\/retrospective$/);
+    if (m && method === 'GET') {
+      const row = db.prepare('SELECT * FROM retrospectives WHERE plan_id = ?').get(m[1]);
+      return send(res, 200, row || null);
+    }
+
+    if (m && method === 'PUT') {
+      const planId = m[1];
+      const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId);
+      if (!plan) return send(res, 404, { error: '계획을 찾을 수 없습니다.' });
+      const body = await readBody(req);
+      const note = body.note != null ? String(body.note) : '';
+      const now = new Date().toISOString();
+      const existing = db.prepare('SELECT * FROM retrospectives WHERE plan_id = ?').get(planId);
+      if (existing) {
+        db.prepare('UPDATE retrospectives SET note=?, updated_at=? WHERE plan_id=?').run(note, now, planId);
+      } else {
+        db.prepare(
+          'INSERT INTO retrospectives (id, plan_id, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+        ).run(randomUUID(), planId, note, now, now);
+      }
+      const row = db.prepare('SELECT * FROM retrospectives WHERE plan_id = ?').get(planId);
+      return send(res, 200, row);
+    }
+
+    // ---- 집계 ----
+    if (pathname === '/api/stats' && method === 'GET') {
+      const planCount = db.prepare('SELECT COUNT(*) AS n FROM plans').get().n;
+      const todoCount = db.prepare('SELECT COUNT(*) AS n FROM todos').get().n;
+      const doneCount = db.prepare("SELECT COUNT(*) AS n FROM todos WHERE status = 'done'").get().n;
+      const execCount = db.prepare('SELECT COUNT(*) AS n FROM todo_executions').get().n;
+      const historyCount = db.prepare('SELECT COUNT(*) AS n FROM plan_history').get().n;
+      return send(res, 200, {
+        plan_count: planCount,
+        todo_count: todoCount,
+        done_count: doneCount,
+        completion_rate: todoCount ? Math.round((doneCount / todoCount) * 100) : 0,
+        execution_count: execCount,
+        history_count: historyCount,
+      });
+    }
+
+    // ---- 전체 데이터 내보내기 ----
+    if (pathname === '/api/export' && method === 'GET') {
+      const data = {
+        exported_at: new Date().toISOString(),
+        plans: db.prepare('SELECT * FROM plans ORDER BY created_at ASC').all(),
+        todos: db.prepare('SELECT * FROM todos ORDER BY created_at ASC').all(),
+        events: db.prepare('SELECT * FROM events ORDER BY start_date ASC').all(),
+        plan_history: db.prepare('SELECT * FROM plan_history ORDER BY changed_at ASC').all(),
+        todo_executions: db.prepare('SELECT * FROM todo_executions ORDER BY executed_at ASC').all(),
+        retrospectives: db.prepare('SELECT * FROM retrospectives ORDER BY updated_at ASC').all(),
+      };
+      const json = JSON.stringify(data, null, 2);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="plan-do-see-export.json"',
+        'Content-Length': Buffer.byteLength(json),
+      });
+      return res.end(json);
     }
 
     if (pathname.startsWith('/api/')) {
