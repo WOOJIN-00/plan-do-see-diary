@@ -185,6 +185,88 @@ button { cursor: pointer; }
 
 .todo-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 
+.public-notice {
+  background: var(--primary-light);
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 14px;
+  margin-bottom: 18px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.stat-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+.stat-card:hover { border-color: var(--primary); }
+.stat-card .stat-num { font-size: 26px; font-weight: 800; color: var(--primary); }
+.stat-card .stat-label { font-size: 13px; color: var(--sub); margin-top: 4px; }
+
+.review-subtitle { font-size: 17px; margin: 22px 0 12px; }
+
+.retro-box { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.retro-box textarea {
+  width: 100%;
+  min-height: 70px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font: inherit;
+  resize: vertical;
+}
+.next-plan-line { font-size: 13px; color: var(--sub); margin-top: 6px; }
+
+.evidence-list { font-size: 13px; color: var(--text); margin-top: 8px; }
+.evidence-list .evidence-row { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.evidence-list .evidence-row:last-child { border-bottom: none; }
+
+/* 할 일 수정 폼 */
+.todo-edit-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--primary-light);
+  border-radius: 8px;
+}
+.todo-edit-form input, .todo-edit-form select { width: auto; flex: 1; min-width: 90px; }
+.todo-edit-form .form-actions { width: 100%; margin-top: 4px; }
+
+.exec-btn { white-space: nowrap; }
+.exec-count { font-size: 12px; color: var(--primary); cursor: pointer; text-decoration: underline; white-space: nowrap; }
+
+/* 할 일 검색/필터/정렬 */
+.todo-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.todo-toolbar input[type="text"] { flex: 1; min-width: 120px; }
+.todo-toolbar select { width: auto; }
+
+/* 계획 수정 이력 */
+.history-section { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.history-row { font-size: 13px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.history-row:last-child { border-bottom: none; }
+.history-time { color: var(--sub); font-size: 12px; }
+.history-diff { margin-top: 4px; }
+.history-diff .field-change { display: block; }
+.history-diff .field-change .old { color: var(--danger); text-decoration: line-through; }
+.history-diff .field-change .new { color: var(--success); }
+
 .todo-item {
   display: flex;
   align-items: center;
