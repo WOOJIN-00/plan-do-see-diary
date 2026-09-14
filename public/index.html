@@ -13,6 +13,7 @@
       <nav class="nav">
         <button class="nav-btn active" data-view="plans">계획</button>
         <button class="nav-btn" data-view="completed">완료 계획</button>
+        <button class="nav-btn" data-view="review">돌아보기</button>
         <button class="nav-btn" data-view="calendar">자격증 캘린더</button>
       </nav>
     </aside>
@@ -20,6 +21,9 @@
     <main class="content">
       <!-- 계획 뷰 -->
       <section id="view-plans" class="view active">
+        <div class="public-notice">
+          이 페이지는 로그인 없이 접속하면 누구나 볼 수 있는 공개 데모입니다. 개인 학습 계획·할 일·실행 기록을 기록하고 돌아보기 위해 만든 앱입니다.
+        </div>
         <header class="view-header">
           <h1>내 계획</h1>
           <button id="btn-new-plan" class="btn primary">+ 새 계획</button>
@@ -76,6 +80,19 @@
         </header>
         <div id="completed-plan-list" class="plan-list"></div>
         <p id="completed-plan-empty" class="empty hidden">아직 완료된 계획이 없습니다. 계획의 할 일을 모두 체크하면 이곳으로 옮겨져요.</p>
+      </section>
+
+      <!-- 돌아보기 뷰 -->
+      <section id="view-review" class="view">
+        <header class="view-header">
+          <h1>돌아보기</h1>
+          <a id="export-link" class="btn ghost small" href="/api/export">⬇ 데이터 내보내기</a>
+        </header>
+        <div id="review-stats" class="stat-grid"></div>
+        <div id="review-detail" class="form-card hidden"></div>
+        <h2 class="review-subtitle">완료된 계획 돌아보기</h2>
+        <div id="review-plans" class="plan-list"></div>
+        <p id="review-empty" class="empty hidden">아직 완료된 계획이 없습니다. 계획을 완료하면 이곳에서 돌아볼 수 있어요.</p>
       </section>
 
       <!-- 자격증 캘린더 뷰 -->
